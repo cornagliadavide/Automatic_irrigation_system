@@ -13,13 +13,13 @@ const int pinDriver    = 9;
 // --- 2. CALIBRAZIONE UMIDITÀ ---
 const int VAL_ACQUA  = 210;  
 const int VAL_ARIA   = 580;  
-const int SOGLIA_ATT = 450;  // Deve essere > 450 per partire
+const int SOGLIA_ATT = 280;  // Deve essere > 450 per partire
 const int PWM_MIN    = 120;  
 const int PWM_MAX    = 255;  
 
 // --- 3. TEMPISTICHE IRRIGAZIONE E ASSORBIMENTO ---
 // Questi valori puoi modificarli a tuo piacimento in base al tuo vaso
-const unsigned long TEMPO_EROGAZIONE = 5000;  // 5 secondi di erogazione acqua
+const unsigned long TEMPO_EROGAZIONE = 2000;  // 5 secondi di erogazione acqua
 const unsigned long TEMPO_PAUSA      = 15000; // 15 secondi di pausa assorbimento nel terreno
 
 unsigned long timerMotore = 0;
