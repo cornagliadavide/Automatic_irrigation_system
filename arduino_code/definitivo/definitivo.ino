@@ -1,26 +1,30 @@
 /*
- * PROGETTO: Sistema di Irrigazione Solare Ibrido (Gestione Energetica)
+ * PROGETTO: Sistema di Irrigazione Solare Ibrido (Gestione Energetica + Log Bluetooth)
  * DESCRIZIONE: Controllo PWM a CICLI di ASSORBIMENTO, Debounce Galleggiante, 
- * Isteresi Li-Ion e Rilevamento Modalità Backup (Stilo AA).
+ * Isteresi Li-Ion e Trasmissione Telemetrica CSV via HC-05 per Tesi.
  */
+
+#include <SoftwareSerial.h>
+
+// --- 0. CONFIGURAZIONE BLUETOOTH (HC-05) ---
+SoftwareSerial BTSerial(2, 3); // D2 = RX, D3 = TX
 
 // --- 1. CONFIGURAZIONE PIN ---
 const int pinSensore   = A0; 
+const int pinBatteria  = A4; // Impostato su A4 come da KiCad
 const int pinSerbatoio = A2; 
-const int pinBatteria  = A4; 
 const int pinDriver    = 9;  
 
 // --- 2. CALIBRAZIONE UMIDITÀ ---
 const int VAL_ACQUA  = 210;  
 const int VAL_ARIA   = 580;  
-const int SOGLIA_ATT = 280;  // Deve essere > 450 per partire
+const int SOGLIA_ATT = 280;  
 const int PWM_MIN    = 120;  
 const int PWM_MAX    = 255;  
 
 // --- 3. TEMPISTICHE IRRIGAZIONE E ASSORBIMENTO ---
-// Questi valori puoi modificarli a tuo piacimento in base al tuo vaso
-const unsigned long TEMPO_EROGAZIONE = 2000;  // 5 secondi di erogazione acqua
-const unsigned long TEMPO_PAUSA      = 15000; // 15 secondi di pausa assorbimento nel terreno
+const unsigned long TEMPO_EROGAZIONE = 2000;  // 2 secondi di erogazione
+const unsigned long TEMPO_PAUSA      = 15000; // 15 secondi di pausa assorbimento
 
 unsigned long timerMotore = 0;
 bool inPausaAssorbimento = false;
@@ -36,7 +40,7 @@ const float R1 = 10000.0;
 const float R2 = 4700.0;  
 const float SOGLIA_RIPRISTINO = 7.4; 
 const float SOGLIA_BLOCCO     = 6.4; 
-const float SOGLIA_SCOLLEGATA = 2.0; // Sotto i 2V significa interruttore aperto (Backup)
+const float SOGLIA_SCOLLEGATA = 2.0; 
 
 bool pompaBloccataPerBatteria = false; 
 bool modalitaBackupAttiva = false;     
@@ -45,16 +49,18 @@ unsigned long ultimoInvioSeriale = 0;
 
 void setup() {
   Serial.begin(9600);
+  BTSerial.begin(38400);
   
   pinMode(pinSensore, INPUT);
   pinMode(pinBatteria, INPUT);
   pinMode(pinSerbatoio, INPUT_PULLUP); 
   pinMode(pinDriver, OUTPUT);
   
-  // Inizializza il timer del motore
   timerMotore = millis();
   
-  Serial.println("--- Sistema Avviato: Logica a Cicli di Assorbimento ---");
+  String intestazione = "Tempo_s;Umidita;Tensione_V;PWM;Stato_Sistema";
+  Serial.println(intestazione);
+  BTSerial.println(intestazione);
 }
 
 
@@ -72,17 +78,14 @@ void loop() {
   // ALGORITMO BATTERIA E BACKUP
   // =========================================================
   if (vBatteria > SOGLIA_RIPRISTINO) {
-    // 1. Li-Ion cariche
     pompaBloccataPerBatteria = false; 
     modalitaBackupAttiva = false;
   } 
   else if (vBatteria <= SOGLIA_BLOCCO && vBatteria > SOGLIA_SCOLLEGATA) {
-    // 2. Li-Ion scariche (tra 2V e 6.4V) -> BLOCCO
     pompaBloccataPerBatteria = true; 
     modalitaBackupAttiva = false;
   }
   else if (vBatteria <= SOGLIA_SCOLLEGATA) {
-    // 3. Interruttore Li-Ion aperto (~0V) -> SBLOCCO (Uso AA)
     pompaBloccataPerBatteria = false; 
     modalitaBackupAttiva = true;
   }
@@ -104,42 +107,32 @@ void loop() {
   // =========================================================
   int pwmOutput = 0;
 
-  // Se il terreno è più secco della soglia desiderata
   if (valoreUmidita > SOGLIA_ATT) {
-    
-    // Controlliamo in che fase del ciclo ci troviamo
     if (inPausaAssorbimento) {
-      // 1. Siamo in pausa. Attendiamo che l'acqua penetri nella terra.
       if (millis() - timerMotore > TEMPO_PAUSA) {
-        // Pausa finita! Resettiamo per iniziare una nuova erogazione
         inPausaAssorbimento = false; 
         timerMotore = millis(); 
       }
     } 
     else {
-      // 2. Non siamo in pausa. Possiamo erogare acqua in modo proporzionale.
       pwmOutput = map(valoreUmidita, SOGLIA_ATT, VAL_ARIA, PWM_MIN, PWM_MAX);
       pwmOutput = constrain(pwmOutput, PWM_MIN, PWM_MAX); 
 
-      // Controlliamo se la pompa è accesa da troppo tempo
       if (millis() - timerMotore > TEMPO_EROGAZIONE) {
-        // Tempo scaduto! Forza lo spegnimento e avvia la pausa
         inPausaAssorbimento = true;
-        timerMotore = millis(); // Riusiamo la variabile per contare la pausa
+        timerMotore = millis(); 
         pwmOutput = 0;
       }
     }
   } 
   else {
-    // Il terreno è sufficientemente umido! 
-    // Resettiamo tutto in modo da essere pronti per il futuro
     inPausaAssorbimento = false;
     timerMotore = millis(); 
     pwmOutput = 0;
   }
 
   // =========================================================
-  // BLOCCHI FINALI DI SICUREZZA (Sovrascrivono tutto)
+  // BLOCCHI FINALI DI SICUREZZA
   // =========================================================
   if (statoGalleggianteStabile == HIGH || pompaBloccataPerBatteria) {
     pwmOutput = 0; 
@@ -148,31 +141,29 @@ void loop() {
   analogWrite(pinDriver, pwmOutput);
 
   // =========================================================
-  // STAMPA SERIALE DIAGNOSTICA (Ogni 2 secondi)
+  // TRASMISSIONE DATI IN FORMATO CSV (Ogni 2 secondi)
   // =========================================================
   if (millis() - ultimoInvioSeriale > 2000) {
-    Serial.print("Umidità: ");
-    Serial.print(valoreUmidita);
-    Serial.print(" | Bat: ");
-    Serial.print(vBatteria);
-    Serial.print(" V | Stato: ");
     
+    String stato = "OK";
     if (statoGalleggianteStabile == HIGH) {
-      Serial.println("BLOCCATA (Manca Acqua nel Serbatoio)");
+      stato = "NO_ACQUA";
     } 
     else if (pompaBloccataPerBatteria) {
-      Serial.println("BLOCCATA (Batterie Li-Ion scariche o spente)");
+      stato = "BATTERIA_SCARICA";
     } 
     else if (valoreUmidita > SOGLIA_ATT && inPausaAssorbimento) {
-      Serial.print("IN PAUSA ASSORBIMENTO ");
-      if(modalitaBackupAttiva) Serial.println("(Backup AA)"); else Serial.println("(Solare/Li-Ion)");
+      stato = "PAUSA_ASSORBIMENTO";
     }
-    else if (modalitaBackupAttiva) {
-      Serial.println("OK (Modalità Backup AA attiva)");
-    } 
-    else {
-      Serial.println("OK (Pronta all'irrigazione)");
-    }
+
+    String rigaCSV = String(millis() / 1000) + ";" +
+                      String(valoreUmidita) + ";" +
+                      String(vBatteria, 2) + ";" +
+                      String(pwmOutput) + ";" +
+                      stato;
+
+    Serial.println(rigaCSV);
+    BTSerial.println(rigaCSV);
     
     ultimoInvioSeriale = millis();
   }
